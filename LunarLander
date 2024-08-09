@@ -1,0 +1,608 @@
+`default_nettype none
+// Empty top module
+
+module top (
+  // I/O ports
+  input  logic hz100, reset,
+  input  logic [20:0] pb,
+  output logic [7:0] left, right,
+         ss7, ss6, ss5, ss4, ss3, ss2, ss1, ss0,
+  output logic red, green, blue,
+
+  // UART ports
+  output logic [7:0] txdata,
+  input  logic [7:0] rxdata,
+  output logic txclk, rxclk,
+  input  logic txready, rxready
+);
+
+lunarlander ll (
+    .hz100(hz100), .reset(reset), .in(pb[19:0]), 
+    .red(red), .green(green),                       // for crashed/landed
+    .ss0(ss0), .ss1(ss1), .ss2(ss2), .ss3(ss3),     // for values
+    .ss5(ss5), .ss6(ss6), .ss7(ss7)                 // for display message
+);
+
+endmodule
+
+module lunarlander #(
+    parameter [15:0] FUEL      = 16'h0800,
+    parameter [15:0] ALTITUDE  = 16'h4500,
+    parameter [15:0] VELOCITY  = 16'h0000,
+    parameter [15:0] THRUST    = 16'h0005,
+    parameter [15:0] GRAVITY   = 16'h0005
+) (
+    input  logic        hz100,
+    input  logic        reset,
+    input  logic [19:0] in,
+    output logic [7:0]  ss7, ss6, ss5,
+    output logic [7:0]  ss3, ss2, ss1, ss0,
+    output logic        red, green
+);
+
+    logic [3:0] disp_ctrl;
+    logic[4:0] keyout;
+    logic keyclk;
+    logic clk;
+    logic [15:0] alt, vel, fuel, thrust;
+    logic land, crash, wen;
+    logic [15:0] alt_next, vel_next, fuel_next, thrust_next;
+
+    // Thrust Assignments
+    always_ff @(posedge keyclk, posedge reset) begin
+        if(reset) begin
+            thrust_next <= THRUST;
+        end
+        else begin
+            if(~keyout[4]) begin
+                thrust_next <= {12'b0, keyout[3:0]};
+            end
+        end
+    end
+
+    // Clocks and Inputs
+    keysync u1(.clk(hz100), .rst(reset), .keyin(in), .keyout(keyout), .keyclk(keyclk));
+    clock_psc u2(.clk(hz100), .rst(reset), .lim(8'd24), .hzX(clk));
+
+    ll_memory #(
+        .ALTITUDE(16'h4500),
+        .VELOCITY(16'h0000),
+        .FUEL(16'h0800),
+        .THRUST(16'h0005)
+    ) mem (
+        .clk(clk),
+        .rst(reset),
+        .wen(wen),
+        .alt_n(alt_next),
+        .vel_n(vel_next),
+        .fuel_n(fuel_next),
+        .thrust_n(thrust_next),
+        .alt(alt),
+        .vel(vel),
+        .fuel(fuel),
+        .thrust(thrust)
+    );
+
+    ll_alu #(
+        .GRAVITY(16'h5)
+    ) alu (
+        .alt(alt),
+        .vel(vel),
+        .fuel(fuel),
+        .thrust(thrust),
+        .alt_n(alt_next),
+        .vel_n(vel_next),
+        .fuel_n(fuel_next)
+    );
+
+    ll_control ctrl (
+        .clk(clk),
+        .rst(reset),
+        .alt(alt),
+        .vel(vel),
+        .land(land),
+        .crash(crash),
+        .wen(wen)
+    );
+
+    // disp_ctrl assign based on Keyout
+    assign disp_ctrl = {keyout == 5'd19, keyout == 5'd18, keyout == 5'd17, keyout == 5'd16};
+
+    ll_display disp_unit (
+        .clk(keyclk),
+        .rst(reset),
+        .land(land),
+        .crash(crash),
+        .disp_ctrl(disp_ctrl),
+        .alt(alt),
+        .vel(vel),
+        .fuel(fuel),
+        .thrust(thrust),
+        .ss7(ss7),
+        .ss6(ss6),
+        .ss5(ss5),
+        .ss3(ss3),
+        .ss2(ss2),
+        .ss1(ss1),
+        .ss0(ss0),
+        .red(red),
+        .green(green)
+    );
+
+endmodule
+
+module ll_display(
+    input logic clk,
+    input logic rst,
+    input logic land,
+    input logic crash,
+    input logic [3:0] disp_ctrl,
+    input logic [15:0] alt,
+    input logic [15:0] vel,
+    input logic [15:0] fuel,
+    input logic [15:0] thrust,
+    output logic [7:0] ss7,
+    output logic [7:0] ss6,
+    output logic [7:0] ss5,
+    output logic [7:0] ss3,
+    output logic [7:0] ss2,
+    output logic [7:0] ss1,
+    output logic [7:0] ss0,
+    output logic red,
+    output logic green
+);
+
+    logic [6:0] alt_ss0, vel_ss0, fuel_ss0, thrust_ss0;
+    logic [6:0] alt_ss1, vel_ss1, fuel_ss1, thrust_ss1;
+    logic [6:0] alt_ss2, vel_ss2, fuel_ss2, thrust_ss2;
+    logic [6:0] alt_ss3, vel_ss3, fuel_ss3, thrust_ss3;
+
+    logic vel_neg;
+    logic [6:0] temp_ss0, temp_ss1, temp_ss2, temp_ss3;
+
+    //Instantiate BCD to 7-segment decoders
+    ssdec bcd_alt0 (.in(val[3:0]), .enable(1'b1), .out(temp_ss0));
+    ssdec bcd_alt1 (.in(val[7:4]), .enable(|val[15:12] | |val[7:4] | | val[11:8] | rst), .out(temp_ss1));
+    ssdec bcd_alt2 (.in(val[11:8]), .enable(|val[15:12] | | val[11:8] | rst), .out(temp_ss2));
+    ssdec bcd_alt3 (.in(val[15:12]), .enable(|val[15:12] | rst), .out(temp_ss3));
+
+    assign ss3 = vel[15] && val == negation ? 8'b01000000 : {1'b0, temp_ss3};
+    assign ss2 = {1'b0, temp_ss2};
+    assign ss1 = {1'b0, temp_ss1};
+    assign ss0 = {1'b0, temp_ss0};
+
+  // Handle Negation
+    logic [15:0] negation;
+  // logic [6:0] vel_negss0, vel_negss1, vel_negss2, vel_negss3;
+    bcdaddsub4 u1(.a(0), .b(vel), .op(1'b1), .s(negation));
+
+    logic [3:0] display;
+    logic [7:0] s7, s6, s5, s4, s3, s2, s1, s0;
+    logic [15:0] val, val2;
+
+    always_ff @(posedge rst, posedge clk) begin
+        if(rst) begin
+            s7 <= 8'b01110111; // "ALT"
+            s6 <= 8'b00111000;
+            s5 <= 8'b01111000;
+            display <= 4'b1000;
+            val2 <= 0;
+        end
+        else if (!(disp_ctrl == 4'b1000 || disp_ctrl == 4'b0100 || disp_ctrl == 4'b0010 || disp_ctrl == 4'b0001)) begin
+            display = display;
+        end
+        else begin
+            display <= disp_ctrl;
+            s7 <= ss7;
+            s6 <= ss6;
+            s5 <= ss5;
+            val2 <= val;
+        end
+    end 
+
+    always_comb begin
+    // Assign outputs based on display mode
+        case (display)
+            4'b1000: begin // Altitude
+                val = alt;
+                ss7 = 8'b01110111; // "ALT"
+                ss6 = 8'b00111000;
+                ss5 = 8'b01111000;
+            end
+            4'b0100: begin // Velocity
+                if(vel[15]) begin
+                    val = negation;
+                end
+                else begin
+                    val = vel;
+                end
+                ss7 = 8'b00111110; // "VEL"
+                ss6 = 8'b01111001;
+                ss5 = 8'b00111000;  
+            end
+            4'b0010: begin // Fuel
+                ss7 = 8'b01101111; // "GAS"
+                ss6 = 8'b01110111;
+                ss5 = 8'b01101101;
+                // Handle the values of GAS
+                val = fuel;
+            end
+            4'b0001: begin // Thrust
+                ss7 = 8'b01111000; // "THR"
+                ss6 = 8'b01110110;
+                ss5 = 8'b01010000;
+                // Handle the values of THRUST
+                val = thrust;
+            end
+            default: begin // Default to Altitude
+                ss7 = s7; // "ALT"
+                ss6 = s6;
+                ss5 = s5;
+                val = val2;
+            end
+        endcase
+    end
+
+    // Assign LEDs
+    assign red = crash;
+    assign green = land;
+
+endmodule
+
+module ll_memory #(
+    parameter [15:0] ALTITUDE = 16'h4500,
+    parameter [15:0] VELOCITY = 16'h0000,
+    parameter [15:0] FUEL     = 16'h0800,
+    parameter [15:0] THRUST   = 16'h0005
+) (
+    input  logic        clk,
+    input  logic        rst,
+    input  logic        wen,
+    input  logic [15:0] alt_n,
+    input  logic [15:0] vel_n,
+    input  logic [15:0] fuel_n,
+    input  logic [15:0] thrust_n,
+    output logic [15:0] alt,
+    output logic [15:0] vel,
+    output logic [15:0] fuel,
+    output logic [15:0] thrust
+);
+
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            alt    <= ALTITUDE;
+            vel    <= VELOCITY;
+            fuel   <= FUEL;
+            thrust <= THRUST;
+        end else if (wen) begin
+            alt    <= alt_n;
+            vel    <= vel_n;
+            fuel   <= fuel_n;
+            thrust <= thrust_n;
+        end
+    end
+
+endmodule
+
+module ll_alu #(
+    parameter [15:0] GRAVITY = 16'h5
+) (
+    input  logic [15:0] alt,
+    input  logic [15:0] vel,
+    input  logic [15:0] fuel,
+    input  logic [15:0] thrust,
+    output logic [15:0] alt_n,
+    output logic [15:0] vel_n,
+    output logic [15:0] fuel_n
+);
+
+    // Intermediate buses for calculations
+    logic [15:0] alt_c, vel_c, fuel_c, alt2,vel2,fuel2;
+    logic [15:0] vel_tmp1, vel_tmp2, vel_temp3;
+
+    // Instantiate bcdaddsub4 modules
+    bcdaddsub4 alt_calc (
+        .a(alt),
+        .b(vel),
+        .op(1'b0), // Addition
+        .s(alt_c)
+    );
+
+    bcdaddsub4 vel_calc2 (
+        .a(vel),
+        .b(GRAVITY),
+        .op(1'b1), // Subtraction
+        .s(vel_tmp2)
+    );
+
+    bcdaddsub4 fuel_calc (
+        .a(fuel),
+        .b(thrust),
+        .op(1'b1), // Subtraction
+        .s(fuel_c)
+    );   
+
+    // Calculate new velocity based on fuel availability
+    assign vel_tmp1 = (fuel == 16'h0) ? 0 : thrust;
+
+    bcdaddsub4 thrust_vel (
+        .a(vel_tmp2),
+        .b(vel_tmp1),
+        .op(1'b0), // Add
+        .s(vel_c)
+    );
+
+    // Handle special cases
+    always_comb begin
+        if (alt_c[15] | (alt_c == 16'h0000)) begin // Altitude negative or 0
+             alt_n = 16'h0000;
+             vel_n = 16'h0000;
+        end else begin
+             alt_n = alt_c;
+             vel_n = vel_c;
+        end
+
+        if (fuel_c[15] | (fuel_c == 16'h0000)) begin // Fuel negative or 0
+             fuel_n = 16'h0000;
+        end else begin
+             fuel_n = fuel_c;
+        end
+    end
+
+endmodule
+
+module ll_control(
+    input logic clk,
+    input logic rst,
+    input logic [15:0] alt,
+    input logic [15:0] vel,
+    output logic land,
+    output logic crash,
+    output logic wen
+);
+
+    // -30 in 16 bits
+    logic [15:0] crash_thres;
+    bcdaddsub4 negthirty(.a(0), .b(16'h30), .op(1'b1), .s(crash_thres));
+
+    // Internal signals
+    logic [15:0] alt_plus_vel;
+    logic [15:0] prev_alt, prev_vel;
+    logic prev_wen;
+
+    // Calculate (altitude + velocity)
+    bcdaddsub4 addsub(.a(alt), .b(vel), .op(1'b0), .s(alt_plus_vel));
+
+    always_ff @(posedge clk, posedge rst) begin
+        if (rst) begin
+            land <= 0;
+            crash <= 0;
+            wen <= 0;
+            prev_alt <= 0;
+            prev_vel <= 0;
+            prev_wen <= 0;
+        end else begin
+            prev_alt <= alt;
+            prev_vel <= vel;
+            prev_wen <= wen;
+
+            // Check for landing or crashing conditions
+            if (alt_plus_vel[15]) begin
+                if (prev_vel < crash_thres) begin
+                    crash <= 1;
+                    land <= 0;
+                    wen <= 0;
+                end else begin
+                    crash <= 0;
+                    land <= 1;
+                    wen <= 0;
+                end
+            end else begin
+                crash <= 0;
+                land <= 0;
+                 wen <= 1;
+            end
+        end
+    end
+
+endmodule
+
+
+module clock_psc (
+  input logic clk,
+  input logic rst,
+  input logic [7:0] lim,
+  output logic hzX
+);
+    logic [7:0] counter;
+
+    always_ff @(posedge clk, posedge rst) begin
+        if (rst) begin
+            counter <= 8'd0;
+            hzX <= 1'b0;
+        end else if (lim == 8'd0) begin
+            hzX <= 0; // No prescaling, should be connected to clk but it's zero?
+        end else begin
+            if (counter == lim) begin
+                counter <= 8'd0;
+                hzX <= ~hzX; // Toggle hzX
+            end else begin
+                counter <= counter + 1'b1;
+            end
+        end
+    end
+
+endmodule
+
+module keysync (
+  input logic clk,
+  input logic rst,
+  input logic [19:0] keyin,
+  output logic [4:0] keyout,
+  output logic keyclk
+);
+    // Two-flip-flop synchronizer for keyclk
+    logic sync_ff1, sync_ff2;
+
+    // Combinational logic for keyout
+    assign keyout[0] = keyin[1] | keyin[3] | keyin[5] | keyin[7] | keyin[9] | keyin[11] | keyin[13] | keyin[15] | keyin[17] | keyin[19];
+    assign keyout[1] = keyin[2] | keyin[3] | keyin[6] | keyin[7] | keyin[10] | keyin[11] | keyin[14] | keyin[15] | keyin[18] | keyin[19];
+    assign keyout[2] = keyin[4] | keyin[5] | keyin[6] | keyin[7] | keyin[12] | keyin[13] | keyin[14] | keyin[15];
+    assign keyout[3] = keyin[8] | keyin[9] | keyin[10] | keyin[11] | keyin[12] | keyin[13] | keyin[14] | keyin[15];
+    assign keyout[4] = keyin[16] | keyin[17] | keyin[18] | keyin[19];
+
+  logic sync_ff3;
+    // Sequential logic for keyclk
+    always_ff @(posedge clk, posedge rst) begin
+        if (rst) begin
+            sync_ff2 <= 1'b0;
+            keyclk <= 1'b0;
+        end else begin
+             // Detect any button press
+            sync_ff2 <= sync_ff1; // Synchronize with two flip-flops
+            keyclk <= sync_ff3; // Output delayed by two clock cycles
+        end
+    end
+  assign sync_ff1 = |keyin;
+  assign sync_ff3 = sync_ff2;
+endmodule
+
+module ssdec (
+  input logic [3:0] in,
+  input logic enable,
+  output logic [6:0] out
+);
+  logic [6:0] SEG7 [15:0];
+  assign SEG7[4'h0] = enable ? 7'b0111111 : 0;
+  assign SEG7[4'h1] = enable ? 7'b0000110 : 0;
+  assign SEG7[4'h2] = enable ? 7'b1011011 : 0;
+  assign SEG7[4'h3] = enable ? 7'b1001111 : 0;
+  assign SEG7[4'h4] = enable ? 7'b1100110 : 0;
+  assign SEG7[4'h5] = enable ? 7'b1101101 : 0;
+  assign SEG7[4'h6] = enable ? 7'b1111101 : 0;
+  assign SEG7[4'h7] = enable ? 7'b0000111 : 0;
+  assign SEG7[4'h8] = enable ? 7'b1111111 : 0;
+  assign SEG7[4'h9] = enable ? 7'b1100111 : 0;
+  assign SEG7[4'ha] = enable ? 7'b1110111 : 0;
+  assign SEG7[4'hb] = enable ? 7'b1111100 : 0;
+  assign SEG7[4'hc] = enable ? 7'b0111001 : 0;
+  assign SEG7[4'hd] = enable ? 7'b1011110 : 0;
+  assign SEG7[4'he] = enable ? 7'b1111001 : 0;
+  assign SEG7[4'hf] = enable ? 7'b1110001 : 0;
+  
+  assign out = SEG7[in];
+endmodule
+
+module bcdaddsub4(
+    input logic [15:0] a,
+    input logic [15:0] b,
+    input logic op,
+    output logic [15:0] s
+);
+
+    logic [3:0] b0_comp, b1_comp, b2_comp, b3_comp;
+    logic [3:0] b0_in, b1_in, b2_in, b3_in;
+    logic c1, c2, c3;
+
+    bcd9comp1 comp0(.in(b[3:0]), .out(b0_comp));
+    bcd9comp1 comp1(.in(b[7:4]), .out(b1_comp));
+    bcd9comp1 comp2(.in(b[11:8]), .out(b2_comp));
+    bcd9comp1 comp3(.in(b[15:12]), .out(b3_comp));
+
+    assign b0_in = op ? b0_comp : b[3:0];
+    assign b1_in = op ? b1_comp : b[7:4];
+    assign b2_in = op ? b2_comp : b[11:8];
+    assign b3_in = op ? b3_comp : b[15:12];
+
+    bcdadd4 adder(.a(a), .b({b3_in, b2_in, b1_in, b0_in}), .ci(op), .s(s), .co());
+
+endmodule
+
+module bcd9comp1(
+    input logic [3:0] in,
+    output logic [3:0] out
+);
+
+    always_comb begin
+        case (in)
+            4'b0000: out = 4'b1001;
+            4'b0001: out = 4'b1000;
+            4'b0010: out = 4'b0111;
+            4'b0011: out = 4'b0110;
+            4'b0100: out = 4'b0101;
+            4'b0101: out = 4'b0100;
+            4'b0110: out = 4'b0011;
+            4'b0111: out = 4'b0010;
+            4'b1000: out = 4'b0001;
+            4'b1001: out = 4'b0000;
+            default: out = 4'bxxxx; // Don't care for invalid BCD inputs
+        endcase
+    end
+
+endmodule
+
+module bcdadd4(
+    input logic [15:0] a,
+    input logic [15:0] b,
+    input logic ci,
+    output logic [15:0] s,
+    output logic co
+);
+
+    logic c1, c2, c3;
+
+    bcdadd1 bcd0(.a(a[3:0]), .b(b[3:0]), .ci(ci), .s(s[3:0]), .co(c1));
+    bcdadd1 bcd1(.a(a[7:4]), .b(b[7:4]), .ci(c1), .s(s[7:4]), .co(c2));
+    bcdadd1 bcd2(.a(a[11:8]), .b(b[11:8]), .ci(c2), .s(s[11:8]), .co(c3));
+    bcdadd1 bcd3(.a(a[15:12]), .b(b[15:12]), .ci(c3), .s(s[15:12]), .co(co));
+
+endmodule
+
+module bcdadd1(
+    input logic [3:0] a,
+    input logic [3:0] b,
+    input logic ci,
+    output logic [3:0] s,
+    output logic co
+);
+
+    logic [3:0] sum;
+    logic carry_out;
+
+    fa4 adder(.a(a), .b(b), .ci(ci), .s(sum), .co(carry_out));
+
+    assign co = ((sum[3] & sum[2]) | (sum[1] & sum[3]) | carry_out);
+    fa4 adder2(.a({1'b0,co,co,1'b0}), .b(sum), .ci(1'b0), .s(s), .co());
+
+endmodule
+
+module fa4(
+    input logic [3:0] a,
+    input logic [3:0] b,
+    input logic ci,
+    output logic [3:0] s,
+    output logic co
+);
+
+    logic c1, c2, c3;
+
+    fa fa0(.a(a[0]), .b(b[0]), .ci(ci), .s(s[0]), .co(c1));
+    fa fa1(.a(a[1]), .b(b[1]), .ci(c1), .s(s[1]), .co(c2));
+    fa fa2(.a(a[2]), .b(b[2]), .ci(c2), .s(s[2]), .co(c3));
+    fa fa3(.a(a[3]), .b(b[3]), .ci(c3), .s(s[3]), .co(co));
+
+endmodule
+
+
+module fa(
+    input logic a,
+    input logic b,
+    input logic ci,
+    output logic s,
+    output logic co
+);
+
+    assign s = a ^ b ^ ci;
+    assign co = (a & b) | (a & ci) | (b & ci);
+
+endmodule
